@@ -28,10 +28,13 @@ def manage_json_packet(queue, xbee, key, value, send=False):
     queue[key] = value
 
     if send:
-        #packet = json.dumps(queue)
+        # Pack the JSON object into a MessagePack byte array
         packet = msgpack.packb(queue)
+
+        # Send the MessagePack data via the XBee
         FT.sendXbee(xbee, packet)
-        # print(packet, flush = True)  # Here, we're printing, but in the actual application, you'd send it over the desired medium.
+
+        # Reset the JSON object (clear the queue)
         queue.clear()
 
 print('starting...')
@@ -136,7 +139,7 @@ def handle_commands():
         elif command[0] == 'calibrate':
             if len(command) >= 2 and selectedDir != 'none':
                 # Construct the absolute path of the script to be executed
-                script_to_execute = os.path.join(current_directory, "FT_pressureCal_presentation.py")
+                script_to_execute = os.path.join(current_directory, "FT_pressureCal.py")
                 process = subprocess.Popen(["python3", "-u", script_to_execute, selectedDir, command[1]], stdout=subprocess.PIPE, text=True)
                 # Start a new thread to wait for the subprocess to finish and handle its output
                 # threading.Thread(target=handle_subprocess_output, args=(process,)).start()
@@ -239,6 +242,7 @@ def handle_commands():
 def handle_subprocess_output(process):
     # Wait for the subprocess to finish and get its output
     output, _ = process.communicate()
+    
     # Send the output to the XBee
     # Parse the JSON string back to a Python object
     data_object = json.loads(output)

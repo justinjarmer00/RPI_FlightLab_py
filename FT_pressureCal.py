@@ -12,14 +12,12 @@ import serial, struct
 import numpy as np
 import Flight_Test_Functions as FT
 import json
-import msgpack
 
 # Wrapper function for pyserial readline function
 class ReadLine:
 	def __init__(self,s):
 		self.buf = bytearray()
 		self.s = s
-		# print(s)
 
 	def readline(self):
 		# MY Readline Function
@@ -43,96 +41,91 @@ class ReadLine:
 
 def manage_json_packet(queue, key, value, send=False):
     queue[key] = value
-
     if send:
         packet = json.dumps(queue)
-        #packet = msgpack.packb(queue)
         print(packet, flush = True)  
         queue.clear()
-        
+
+def initialize_serial_ports():
+    serial_ports = {
+        1: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0',
+        2: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.4:1.0',
+        3: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0',
+        4: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2:1.0'
+    }
+    connections = {}
+    for idx, port in serial_ports.items():
+        try:
+            ser = serial.Serial(port, 115200)
+            connections[idx] = ReadLine(ser)
+            manage_json_packet({}, "console", f"Connected to port {idx} ({port})", True)
+        except Exception as e:
+            manage_json_packet({}, "merror", f"Could not connect to port {idx} ({port}): \n\t{str(e)}", True)
+    return connections
+
 data_json = {}
+
 def main():
-    if len(sys.argv) < 3:
-        manage_json_packet(data_json, "console", 'Usage Error: python3 FT_pressureCal.py <arg1> <arg2>', True)
-        # print('Usage Error: python3 FT_pressureCal.py <arg1> <arg2>')
+    if len(sys.argv) < 2:
+        manage_json_packet(data_json, "merror", 'Usage Error: python3 FT_pressureCal.py <arg1> <arg2 (optional)>', True)
         sys.stdout.flush()
         return
 
-    try:
-        ser1 = serial.Serial('/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0',115200)
-        ser2 = serial.Serial('/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.4:1.0',115200)
-        ser3 = serial.Serial('/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0',115200)
-        ser4 = serial.Serial('/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2:1.0',115200)
-    except Exception as e:
-        manage_json_packet(data_json, "console", 'Serial connection to pressure taps could not be opened:', True)
-    #     print('Serial connection to pressure taps could not be opened:', str(e))
-        sys.stdout.flush()
-        return
-        
-    # Create object for readline wrapper function above
-    r1 = ReadLine(ser1)
-    r2 = ReadLine(ser2)
-    r3 = ReadLine(ser3)
-    r4 = ReadLine(ser4)
-    
+    port_indices = {
+        0: slice(0, 13),   # Indices for serial port 1
+        1: slice(13, 26),  # Indices for serial port 2
+        2: slice(26, 39),  # Indices for serial port 3
+        3: slice(39, 52)   # Indices for serial port 4
+    }
+
+    serial_connections = initialize_serial_ports()
+    if not serial_connections:
+        manage_json_packet(data_json, "merror", "No serial connections available", True)
+        sys.exit()
+
     location = "/home/pi/Documents/" + sys.argv[1] + "/"
     filename = "CALIBRATION_" + sys.argv[1] + ".txt"
     calfilestring = location + filename
-    manage_json_packet(data_json, "console", calfilestring, True)
-    # print(calfilestring)
+    # manage_json_packet(data_json, "console", calfilestring, True)
+    
+    # Initialize CAL with zeros
+    CAL = np.zeros(52)
+
     try:
-        calfile = open(calfilestring,'w')    
+        with open(calfilestring, 'w') as calfile:
+            iterations = int(sys.argv[2]) if len(sys.argv) > 2 else 100
+            cal = [np.zeros(52) for _ in range(iterations)]
+
+            for k in range(iterations):
+                for idx, reader in serial_connections.items():
+                    try:
+                        output = reader.readline()
+                        if output:
+                            unpacked_data = struct.unpack(f'>{13}h', output)
+                            cal[k][port_indices[idx]] = unpacked_data
+                    except Exception as e:
+                        manage_json_packet({}, "merror", f"Error reading from port {idx+1}: {str(e)}", True)
+
+            # Calculate the mean across all iterations
+            CAL = np.mean(cal, axis=0)
+            calstr = '\t'.join(f'{x:.4f}' for x in CAL)
+            calfile.write(calstr + '\n')
+            
+            reply = [
+                "\n---------------------------------",
+                "Calibration Complete",
+                f"File Location: {calfilestring}",
+                f"Number of Serial Connections: {len(serial_connections)}",
+                f"Number of Iterations: {iterations}",
+            ]
+            manage_json_packet({}, "console", "\n".join(reply), True)
+            manage_json_packet({}, 'calibration', list(CAL), True)
+
     except Exception as e:
-        ser1.close()
-        ser2.close()
-        ser3.close()
-        ser4.close()
-        manage_json_packet(data_json, "console", 'File could not be opened:' + calfilestring, True)
-        # print('File could not be opened:' + calfilestring)#str(e))
-        sys.stdout.flush()
-        return
-    try:
-        cal_sample = int(sys.argv[2])
-    except:
-        cal_sample = 100
-    
-    cal = [[0 for x in range(52)] for y in range(cal_sample)]
-    p = 0
-    for k in range(cal_sample):
-        output1 = r1.readline()
-        output2 = r2.readline()
-        output3 = r3.readline()
-        output4 = r4.readline()
-        output = output1+output2+output3+output4		
-        output = struct.unpack('>hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh', output)
-        cal[k][0:52] = output[0:52]
-    
-    cal_array = np.array(cal)
-    CAL = np.mean(cal_array, axis=0)
-    
-    calfloat = [0 for x in range(52)]
-    calstr = ''
-    for i in range(52):
-        calfloat[i] = float(CAL[i])
-        calstr += '{0:.4f}'.format(CAL[i]) + '\t'
-        
-    calfile.write(calstr)
-    calfile.close()
-    
-    reply = []
-    rep1 = "\n---------------------------------"
-    reply.append(rep1)
-    rep2 =  "Calibration Complete"
-    reply.append(rep2)
-    rep3 = calfilestring
-    reply.append(rep3)
-    reply = "\n".join(reply)
-    ser1.close()
-    ser2.close()
-    ser3.close()
-    ser4.close()
-    manage_json_packet(data_json, "console", reply, True)
-    manage_json_packet(data_json, 'calibration', calfloat, True)
+        for reader in serial_connections.values():
+            reader.s.close()
+        manage_json_packet({}, "merror", f'File could not be created/opened or other error: {calfilestring}', True)
+
     sys.stdout.flush()
 
 if __name__ == "__main__":
