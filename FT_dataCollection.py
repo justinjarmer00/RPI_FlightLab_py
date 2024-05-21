@@ -17,6 +17,9 @@ import board
 import busio
 import msgpack
 
+pitot_index = 38
+quit_flag = False
+
 # Handle the issue where signal voltage to sbRIO would go to high on close
 def cleanup_GPIO():
     GPIO.output(24, 0)
@@ -72,6 +75,12 @@ def handle_error(message, exception=None):
     else:
         manage_json_packet({}, "merror", message, True)
 
+def slice_length(s):
+    """Calculate the number of items in a slice."""
+    # Default step is 1 if not provided.
+    step = s.step if s.step is not None else 1
+    return (s.stop - s.start + step - 1) // step
+
 def initialize_serial_ports():
     serial_ports = {
         0: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0',
@@ -97,6 +106,7 @@ def initialize_imu():
     try:
         i2c = busio.I2C(board.SCL, board.SDA)
         IMUsensor = adafruit_bno055.BNO055_I2C(i2c)
+        manage_json_packet({}, "console", "IMU initialized successfully", True)
         return IMUsensor, True
     except Exception as e:
         handle_error('Connection to IMU could not be made', e)
@@ -108,6 +118,7 @@ def initialize_gps():
         gps = adafruit_gps.GPS(GPS_serial, debug=False)
         gps.send_command(b"PMTK314,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0")
         gps.send_command(b"PMTK220,1000")
+        manage_json_packet({}, "console", "GPS initialized successfully", True)
         return GPS_serial, gps, True
     except Exception as e:
         handle_error('Connection to GPS could not be made', e)
@@ -123,16 +134,11 @@ def initialize_adc():
         handle_error('Connection to ADC could not be made', e)
         return None, None, False
 
-# def create_unpacker(num_connections):
-#     # Assuming each connection reads 13 short values
-#     num_values = num_connections * 13
-#     return struct.Struct(f'>{num_values}h')
-
 main_json = {}
-# command_json = {}
 data_json = {}
 
 def main():
+    global should_stop
     manage_json_packet({}, "console", "dataCollection main() started", True)
     # Create threads for handling commands and data processing
     command_thread = threading.Thread(target=handle_command)
@@ -142,7 +148,7 @@ def main():
 
     while True:
         if not command_thread.is_alive() or not data_thread.is_alive():
-            handle_error("One of the threads has stopped for Data Collection.")
+            handle_error("One or both of the threads have stopped for Data Collection.")
             should_stop = True
             break
         time.sleep(1) # Sleep for a second to avoid tight looping
@@ -166,7 +172,7 @@ def handle_command():
     manage_json_packet({}, "console", "handle_command() thread terminated", True)
     
 def data_processing():
-    quit_Flag = False
+    global quit_flag
     manage_json_packet({}, "console", 'data_processing() started', True)
 
     #check if all necessary arguments are included
@@ -216,18 +222,22 @@ def data_processing():
             if len(CAL_str) >= CAL_SIZE:
                 # Only update CAL if the file provides enough data
                 CAL = tuple(map(float, CAL_str[:CAL_SIZE]))
+                manage_json_packet({}, "console", "Calibration data loaded successfully", True)
             else:
                 # Handle case where not enough calibration data is available
                 handle_error(f'Insufficient calibration data in file: {calfilestring}', None)
     except Exception as e:
         # Handle file open/read errors
         handle_error(f'Calibration file could not be opened or read: {calfilestring}', e)
+    
+    manage_json_packet({}, 'calibration', list(CAL), True)
 
     # Continue with program execution
 
     start = False
-
+    manage_json_packet({}, "console", f'data_processing() thread initialized... Quit: {quit_flag}', True)
     while not quit_flag:
+        # manage_json_packet({}, "console", "data_processing() thread running", True)
         if not command_queue.empty():
             command = command_queue.get()
             if command == 'start':
@@ -237,21 +247,30 @@ def data_processing():
                 start = False
             elif command == 'quit':
                 GPIO.output(24, 0)
+                start = False
                 quit_flag = True
                 manage_json_packet({}, "console", "QUIT command received", True)
                 break
             else:
                 manage_json_packet({}, "console", 'Command not recognized', True)
 
+            manage_json_packet({}, "console", f'Start: {start}\tQuit: {quit_flag}', True)
+        else:
+            pass
+            # manage_json_packet({}, "console", 'No command received', True)
         if start and not quit_flag:
             run_data_collection(CAL, serial_connections, read_lines, gps, GPSconnected, adc, GAIN, ADCconnected, IMUsensor, IMUconnected)
-
-        time.sleep(0.07)
-
+            start = False
+        elif not start and not quit_flag:
+            run_idle(CAL, serial_connections, read_lines, gps, GPSconnected, adc, GAIN, ADCconnected, IMUsensor, IMUconnected)
+        # manage_json_packet({}, "console", "data_processing() thread running", True)
+        time.sleep(1) #0.07
+    manage_json_packet({}, "console", "data_processing() thread ending", True)
     close_connections(serial_connections, GPS_serial)
 
 def run_data_collection(CAL, serial_connections, read_lines, gps, GPSconnected, adc, GAIN, ADCconnected, IMUsensor, IMUconnected):
     k = 0
+    global quit_flag
     now = datetime.datetime.now()
     current_time = now.strftime("%H_%M_%S")
     location = "/home/pi/Documents/" + sys.argv[1] + "/"
@@ -286,7 +305,7 @@ def run_data_collection(CAL, serial_connections, read_lines, gps, GPSconnected, 
     IMUlinacc = [0, 0, 0]
     IMUgrav = [0, 0, 0]
 
-    p_vals = CAL.copy()
+    p_vals = list(CAL)
 
     port_indices = {
         0: slice(0, 13),   # Indices for serial port 1
@@ -294,6 +313,9 @@ def run_data_collection(CAL, serial_connections, read_lines, gps, GPSconnected, 
         2: slice(26, 39),  # Indices for serial port 3
         3: slice(39, 52)   # Indices for serial port 4
     }
+
+    pitot_avg = 0 
+    alpha_avg = 0
 
     while True:
         try:
@@ -357,46 +379,23 @@ def run_data_collection(CAL, serial_connections, read_lines, gps, GPSconnected, 
             for idx in range(4):  # Assuming 4 ports as defined
                 if idx in serial_connections:
                     try:
-                        unpacker = struct.Struct(f'>{13}h')
+                        slice_idx = port_indices[idx]
+                        num_elements = slice_length(slice_idx)  # Get the correct number of elements
+                        unpacker = struct.Struct(f'>{num_elements}h')
                         data = read_lines[idx].read_and_clear()
                         unpacked_data = unpacker.unpack(data)
-                        p_vals[port_indices[idx]] = unpacked_data[:len(port_indices[idx])]
+                        p_vals[slice_idx] = unpacked_data  # This should match the length now
                     except Exception as e:
                         handle_error(f'Serial connection {idx+1} read failed', e)
                         serial_connections[idx].close()
                         del serial_connections[idx]
                         del read_lines[idx]
-                        p_vals[port_indices[idx]] = CAL[port_indices[idx]]
-                else:
-                    # If the connection is missing or has been removed, fill with CAL values
-                    p_vals[port_indices[idx]] = CAL[port_indices[idx]]
-
-            # Read from serial connections
-            # valid_data = []
-            # for i, (ser, reader) in enumerate(zip(serial_connections, read_lines)):
-            #     try:
-            #         data = reader.read_and_clear()
-            #         valid_data.append(data)
-            #     except Exception as e:
-            #         handle_error(f'Serial connection {i+1} read failed', e)
-            #         ser.close()
-            #         serial_connections.pop(i)
-            #         read_lines.pop(i)
-            #         unpacker = create_unpacker(len(serial_connections))
-
-            # if valid_data:
-            #     output = b"".join(valid_data)
-            #     try:
-            #         p_vals = unpacker.unpack(output)
-            #     except Exception as e:
-            #         handle_error('Unpacking serial data failed', e)
-            #         continue  # Skip processing if unpacking fails
-
-            # output = b"".join([r.read_and_clear() for r in read_lines])
-            # p_vals = unpacker.unpack(output)
-
-            pitot = abs(p_vals[51] - CAL[51]) / 1000
+                        p_vals[slice_idx] = CAL[slice_idx]
+            pitot_index = 30
+            # manage_json_packet({}, "console", f'pitot_index: {pitot_index}\tp_vals[pitot]: {p_vals[pitot_index]}\tCAL[pitot]: {CAL[pitot_index]}', True)
+            pitot = abs(p_vals[pitot_index] - CAL[pitot_index]) / 1000
             pitot = np.sqrt((2 * pitot * 249.09) / 1.13)
+            # manage_json_packet({}, "console", f'Pitot: {pitot}', True)
 
             downlink_pt1 = a_b_string + "\t" + '{0:.2f}'.format(pitot) + "\t" + gps_spd + "\t" + gps_fix
             downlink_pt2 = '{0:.3f}'.format(IMUaccel[0]) + "\t" + '{0:.3f}'.format(IMUaccel[1]) + "\t" + '{0:.3f}'.format(IMUaccel[2]) + "\t"
@@ -406,10 +405,10 @@ def run_data_collection(CAL, serial_connections, read_lines, gps, GPSconnected, 
             downlink_pt6 = '{0:.3f}'.format(IMUgrav[0]) + "\t" + '{0:.3f}'.format(IMUgrav[1]) + "\t" + '{0:.3f}'.format(IMUgrav[2])
 
             p_string = "\t".join(map(str, p_vals))
-            filestring = downlink_pt1 + '\t' + p_string + '\t' + '{0:.3f}'.format(run_time / 1000000000) + downlink_pt2 + downlink_pt3 + downlink_pt4 + downlink_pt5 + downlink_pt6
+            filestring = downlink_pt1 + '\t' + p_string + '\t' + '{0:.3f}'.format(run_time / 1000000000) + '\t' + downlink_pt2 + downlink_pt3 + downlink_pt4 + downlink_pt5 + downlink_pt6
             file.write(filestring + '\n')
 
-            pitot_avg += pitot
+            pitot_avg = pitot
             alpha_avg += a_b[0]
 
             try:
@@ -433,10 +432,84 @@ def run_data_collection(CAL, serial_connections, read_lines, gps, GPSconnected, 
             while time.perf_counter_ns() < target_time:
                 pass
 
+            k += 1
+
         except Exception as e:
             handle_error('Error during data collection loop', e)
 
     file.close()
+
+def run_idle(CAL, serial_connections, read_lines, gps, GPSconnected, adc, GAIN, ADCconnected, IMUsensor, IMUconnected):
+    # manage_json_packet({}, "console", "Idle cycle started", True)
+    # Placeholder for sensor data processing results
+    results = {}
+    # manage_json_packet({}, "console", str(CAL), True)
+    # Initialize default sensor data structures
+    p_vals = list(CAL)
+    # manage_json_packet({}, "console", "Idle cycle initialized", True)
+    a_b = [0 for _ in range(2)]
+
+    port_indices = {
+        0: slice(0, 13),   # Indices for serial port 1
+        1: slice(13, 26),  # Indices for serial port 2
+        2: slice(26, 39),  # Indices for serial port 3
+        3: slice(39, 52)   # Indices for serial port 4
+    }
+    
+    try:
+        # Collect and process data from each serial port
+        for idx in range(4):
+            if idx in serial_connections:
+                try:
+                    unpacker = struct.Struct(f'>{13}h')
+                    data = read_lines[idx].read_and_clear()
+                    unpacked_data = unpacker.unpack(data)
+                    p_vals[port_indices[idx]] = unpacked_data
+                except Exception as e:
+                    handle_error(f'Serial connection {idx+1} read failed', e)
+                    p_vals[port_indices[idx]] = list(CAL[port_indices[idx]])
+        pitot = abs(p_vals[pitot_index] - CAL[pitot_index]) / 1000
+        pitot = np.sqrt((2 * pitot * 249.09) / 1.13)
+        # Process GPS data
+        if GPSconnected:
+            try:
+                gps.update()
+                gps_spd = '{0:.2f}'.format(gps.speed_knots * 0.514444) if gps.speed_knots else 'None'
+                gps_fix = "{}".format(gps.fix_quality) if gps.has_fix else 'None'
+            except Exception as e:
+                GPSconnected = False
+                gps_spd = 'N/A'
+                gps_fix = 'N/A'
+                handle_error('GPS disconnected or failed to update', e)
+
+        # Process ADC data
+        if ADCconnected:
+            try:
+                for i in range(1):
+                    a_b[i] = adc.read_adc(i, gain=GAIN)
+                a_b[0] = -(a_b[0] * -0.007014328893869 + 44.854179420175704)
+                a_b_string = '{0:.2f}'.format(a_b[0])
+            except Exception as e:
+                ADCconnected = False
+                a_b_string = '999.99'
+                handle_error('ADC disconnected or failed to read', e)
+
+        # Process IMU data
+        # if IMUconnected:
+        #     try:
+        #         ...  # IMU data processing
+        #     except Exception as e:
+        #         ...  # Handle IMU data processing error
+
+        # send information
+        manage_json_packet(data_json, "p", int(10 * pitot))
+        manage_json_packet(data_json, "gs", gps_spd)
+        manage_json_packet(data_json, "gf", gps_fix)
+        manage_json_packet(data_json, "a", int(10 * a_b[i]))
+        manage_json_packet(data_json, "pv", [int(x / 10) for x in p_vals], True)
+
+    except Exception as e:
+        handle_error('Error during idle cycle', e)
 
 def close_connections(serial_connections, GPS_serial):
     # Iterate over the serial connection objects stored in the values of the dictionary

@@ -145,6 +145,16 @@ def handle_commands():
                 # threading.Thread(target=handle_subprocess_output, args=(process,)).start()
                 threading.Thread(target=handle_stream_subprocess_output, args=(process,)).start()
                 reply = 'calibration command recieved'
+            elif len(command) == 1 and selectedDir != 'none':
+                reply = 'error beginning subprocess: no number of samples given'
+                # Construct the absolute path of the script to be executed
+                script_to_execute = os.path.join(current_directory, "FT_pressureCal.py")
+                process = subprocess.Popen(["python3", "-u", script_to_execute, selectedDir], stdout=subprocess.PIPE, text=True)
+                # Start a new thread to wait for the subprocess to finish and handle its output
+                # threading.Thread(target=handle_subprocess_output, args=(process,)).start()
+                threading.Thread(target=handle_stream_subprocess_output, args=(process,)).start()
+                reply = 'calibration command recieved'
+                
             else:
                 reply = 'error beginning subprocess: directory not selected?'
                 # FT.sendXbee(xbee, reply)
@@ -174,7 +184,7 @@ def handle_commands():
                         rateHz = command[1]
                 except:
                     reply = 'default Hz will be used'
-                script_to_execute = os.path.join(current_directory, "FT_dataCollection_presentation.py")
+                script_to_execute = os.path.join(current_directory, "FT_dataCollection.py")
                 flight_process = subprocess.Popen(["python3", script_to_execute, selectedDir, rateHz], 
                            stdin=subprocess.PIPE, 
                            stdout=subprocess.PIPE, 

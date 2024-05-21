@@ -48,19 +48,19 @@ def manage_json_packet(queue, key, value, send=False):
 
 def initialize_serial_ports():
     serial_ports = {
-        1: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0',
-        2: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.4:1.0',
-        3: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0',
-        4: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2:1.0'
+        0: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0',
+        1: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.4:1.0',
+        2: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0',
+        3: '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2:1.0'
     }
     connections = {}
     for idx, port in serial_ports.items():
         try:
             ser = serial.Serial(port, 115200)
             connections[idx] = ReadLine(ser)
-            manage_json_packet({}, "console", f"Connected to port {idx} ({port})", True)
+            manage_json_packet({}, "console", f"Connected to port {idx + 1} ({port})", True)
         except Exception as e:
-            manage_json_packet({}, "merror", f"Could not connect to port {idx} ({port}): \n\t{str(e)}", True)
+            manage_json_packet({}, "merror", f"Could not connect to port {idx + 1} ({port}): \n\t{str(e)}", True)
     return connections
 
 data_json = {}
@@ -90,27 +90,29 @@ def main():
     
     # Initialize CAL with zeros
     CAL = np.zeros(52)
-
     try:
         with open(calfilestring, 'w') as calfile:
             iterations = int(sys.argv[2]) if len(sys.argv) > 2 else 100
-            cal = [np.zeros(52) for _ in range(iterations)]
+            cal = [np.zeros(52) for _ in range(iterations)]  # Initialize cal array with zeros for each iteration
 
             for k in range(iterations):
-                for idx, reader in serial_connections.items():
-                    try:
-                        output = reader.readline()
-                        if output:
-                            unpacked_data = struct.unpack(f'>{13}h', output)
-                            cal[k][port_indices[idx]] = unpacked_data
-                    except Exception as e:
-                        manage_json_packet({}, "merror", f"Error reading from port {idx+1}: {str(e)}", True)
+                for idx in range(4):
+                    # manage_json_packet({}, "console", f"Range: {port_indices[idx]}", True)
+                    if idx in serial_connections:
+                        try:
+                            output = serial_connections[idx].readline()
+                            if output:
+                                unpacked_data = struct.unpack(f'>{13}h', output)
+                                # Properly assign unpacked_data to the correct slice in cal array
+                                cal[k][port_indices[idx]] = unpacked_data
+                        except Exception as e:
+                            manage_json_packet({}, "merror", f"Error reading from port {idx+1}: {str(e)}", True)
 
-            # Calculate the mean across all iterations
+            # Calculate the mean across all iterations to get the final CAL array
             CAL = np.mean(cal, axis=0)
+            # Convert CAL to string with formatted float values
             calstr = '\t'.join(f'{x:.4f}' for x in CAL)
-            calfile.write(calstr + '\n')
-            
+            calfile.write(calstr)            
             reply = [
                 "\n---------------------------------",
                 "Calibration Complete",
